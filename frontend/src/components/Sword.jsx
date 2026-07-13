@@ -1,69 +1,81 @@
 import React, { useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
+import { getSwordEuler } from '../gameLogic';
 
 const Sword = ({ player, index, totalPlayers, playerOrientations }) => {
-  const groupRef = useRef();
+  const swordRef = useRef();
 
   useFrame(() => {
-    if (!groupRef.current) return;
-    
-    // Read orientation directly from ref to avoid React re-renders
+    if (!swordRef.current) return;
+
+    // Reuse the complete sword group's Euler object so the blade, guard, grip,
+    // and pommel follow the same low-latency phone pose without allocations.
     const orientation = playerOrientations.current[player.id];
     if (!orientation) return;
-
-    const { alpha, beta, gamma } = orientation;
-
-    // Convert degrees to radians
-    // Convert degrees to radians directly
-    const d2r = (deg) => (deg || 0) * (Math.PI / 180);
-
-    // Create an Euler angle based on the device orientation.
-    // The order 'YXZ' works well for mapping standard device orientation.
-    // This maps the phone's physical movement to a 3D sword movement.
-    // - beta (x-axis) is phone tilting forward/backward
-    // - gamma (y-axis) is phone tilting left/right
-    // - alpha (z-axis) is phone rotating around its vertical axis
-    
-    // Note: This mapping might need fine-tuning depending on how the player holds the phone.
-    // A standard "holding a sword" pose means the phone is held vertically.
-    // Let's assume holding it like a TV remote, pointing forward.
-    
-    // Smooth rotation using standard rotation assignment
-    groupRef.current.rotation.set(
-      d2r(beta),
-      d2r(alpha),
-      d2r(-gamma),
-      'YXZ'
-    );
+    getSwordEuler(orientation, swordRef.current.rotation);
   });
 
-  // Calculate base position based on player index to space them out
-  // If 1 player: center (0)
-  // If 2 players: left (-2) and right (2)
+  // If 1 player: center (0). If 2 players: left (-2) and right (2).
   const xPos = totalPlayers === 1 ? 0 : (index === 0 ? -2 : 2);
 
   return (
-    <group position={[xPos, 0, 0]}>
-      {/* Base/Hilt of the sword */}
-      <mesh position={[0, 0, 0]}>
-        <boxGeometry args={[0.3, 0.3, 0.8]} />
-        <meshStandardMaterial color="#555" />
+    <group ref={swordRef} position={[xPos, 0, 0]}>
+      {/* Blade: its base remains at the group's pivot, matching collision logic. */}
+      <mesh position={[0, 0, -2.5]}>
+        <boxGeometry args={[0.16, 0.06, 5]} />
+        <meshStandardMaterial
+          color={player.color}
+          emissive={player.color}
+          emissiveIntensity={5}
+          roughness={0.1}
+          metalness={0.9}
+          toneMapped={false}
+        />
       </mesh>
-      
-      {/* Blade of the sword - Changed container to group and gave mesh the geometry */}
-      <group ref={groupRef} position={[0, 0, 0]}>
-        <mesh position={[0, 0, -2.5]}>
-          <boxGeometry args={[0.15, 0.05, 5]} />
-          {/* Low-poly neon emission style */}
-          <meshStandardMaterial 
-            color={player.color} 
+
+      {/* Bright cross guard makes hilt rotation easy to read. */}
+      <mesh position={[0, 0, 0.08]}>
+        <boxGeometry args={[1.05, 0.13, 0.16]} />
+        <meshStandardMaterial
+          color="#f7f7ff"
+          emissive={player.color}
+          emissiveIntensity={2.8}
+          metalness={0.85}
+          roughness={0.18}
+          toneMapped={false}
+        />
+      </mesh>
+
+      {/* Grip extends behind the blade pivot, so it visibly swings with the blade. */}
+      <mesh position={[0, 0, 0.58]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.15, 0.18, 0.92, 8]} />
+        <meshStandardMaterial color="#17121f" metalness={0.65} roughness={0.35} />
+      </mesh>
+
+      {[0.25, 0.48, 0.71, 0.91].map(z => (
+        <mesh key={z} position={[0, 0, z]}>
+          <torusGeometry args={[0.18, 0.035, 8, 16]} />
+          <meshStandardMaterial
+            color={player.color}
             emissive={player.color}
-            emissiveIntensity={5}
-            roughness={0.1}
-            metalness={0.9}
+            emissiveIntensity={2.2}
+            toneMapped={false}
           />
         </mesh>
-      </group>
+      ))}
+
+      {/* Faceted neon pommel finishes the handle silhouette. */}
+      <mesh position={[0, 0, 1.13]}>
+        <octahedronGeometry args={[0.25, 0]} />
+        <meshStandardMaterial
+          color={player.color}
+          emissive={player.color}
+          emissiveIntensity={3.5}
+          metalness={0.8}
+          roughness={0.15}
+          toneMapped={false}
+        />
+      </mesh>
     </group>
   );
 };

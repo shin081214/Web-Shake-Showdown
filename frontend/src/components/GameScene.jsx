@@ -1,4 +1,4 @@
-import React, { useRef, useState, useMemo } from 'react';
+import React, { useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { Stars } from '@react-three/drei';
 import {
@@ -9,127 +9,124 @@ import {
   Scanline,
 } from '@react-three/postprocessing';
 import { BlendFunction } from 'postprocessing';
-import * as THREE from 'three';
 import Sword from './Sword';
-
-// Short-lived particle burst spawned when a player lands a hit.
-const HitBurst = ({ position, color, onDone }) => {
-  const groupRef = useRef();
-  const life = useRef(0);
-  const duration = 0.6;
-
-  // Pre-compute random velocity vectors once per burst.
-  const particles = useMemo(() => {
-    return Array.from({ length: 14 }, () => ({
-      dir: new THREE.Vector3(
-        (Math.random() - 0.5) * 2,
-        (Math.random() - 0.5) * 2,
-        (Math.random() - 0.5) * 2
-      ).normalize(),
-      speed: 4 + Math.random() * 6,
-    }));
-  }, []);
-
-  useFrame((state, delta) => {
-    life.current += delta;
-    const t = life.current / duration;
-    if (!groupRef.current) return;
-
-    groupRef.current.children.forEach((mesh, i) => {
-      const p = particles[i];
-      mesh.position.addScaledVector(p.dir, p.speed * delta);
-      const s = Math.max(0, 1 - t);
-      mesh.scale.setScalar(s);
-      mesh.material.opacity = s;
-    });
-
-    if (life.current >= duration) onDone();
-  });
-
-  return (
-    <group ref={groupRef} position={position}>
-      {particles.map((_, i) => (
-        <mesh key={i}>
-          <boxGeometry args={[0.25, 0.25, 0.25]} />
-          <meshStandardMaterial
-            color={color}
-            emissive={color}
-            emissiveIntensity={4}
-            transparent
-            toneMapped={false}
-          />
-        </mesh>
-      ))}
-    </group>
-  );
-};
+import HitEffects from './HitEffects';
+import { swordHitsObstacle } from '../gameLogic';
+import { getDifficulty } from '../difficulty';
 
 // Component to handle obstacles logic
-const ObstaclesManager = ({ players, playerOrientations, onHit, onBurst }) => {
+const ObstaclesManager = ({
+  players,
+  playerOrientations,
+  onHit,
+  onMiss,
+  hitEffects,
+  onDifficultyChange,
+}) => {
   const [obstacles, setObstacles] = useState([]);
   const obstaclesRef = useRef([]);
   const timeRef = useRef(0);
-
-  const spawnRate = 0.8; // Faster spawns
-  const speed = 25; // Faster units per second for synthwave speed
+  const elapsedRef = useRef(0);
+  const hitCountRef = useRef(0);
+  const lastDifficultyRef = useRef(null);
 
   useFrame((state, delta) => {
     timeRef.current += delta;
+    elapsedRef.current += delta;
+    const difficulty = getDifficulty(elapsedRef.current, hitCountRef.current * 10);
+    const lastDifficulty = lastDifficultyRef.current;
+    if (
+      !lastDifficulty
+      || lastDifficulty.level !== difficulty.level
+      || lastDifficulty.isRush !== difficulty.isRush
+    ) {
+      lastDifficultyRef.current = difficulty;
+      onDifficultyChange?.(difficulty);
+    }
 
     let next = obstaclesRef.current;
 
     // Spawn new obstacle
-    if (timeRef.current > spawnRate) {
+    if (timeRef.current > difficulty.spawnRate) {
       timeRef.current = 0;
 
       const x = (Math.random() - 0.5) * 8; // Random lane
       const z = -60; // Start far away
 
       const playerArray = Object.values(players);
-      const color = playerArray.length > 0
-        ? playerArray[Math.floor(Math.random() * playerArray.length)].color
-        : '#00f3ff'; // Default neon cyan
+      const targetPlayer = playerArray.length > 0
+        ? playerArray[Math.floor(Math.random() * playerArray.length)]
+        : null;
+      const color = targetPlayer?.color ?? '#00f3ff'; // Default neon cyan
 
-      next = [...next, { id: Math.random(), x, y: 0, z, color, hit: false }];
+      next = [...next, {
+        id: Math.random(),
+        x,
+        y: 0,
+        z,
+        color,
+        targetPlayerId: targetPlayer?.id,
+        hit: false,
+      }];
     }
 
     // Move obstacles and check collisions. State is driven from a ref instead of a
     // setState updater so this stays free of side effects: under StrictMode the
     // updater runs twice, which previously double-counted every hit.
     const hitPlayerIds = [];
+    const missedPlayerIds = [];
     const pArray = Object.values(players);
     next = next.map(obs => {
-      let updatedObs = { ...obs, z: obs.z + speed * delta };
+      let updatedObs = {
+        ...obs,
+        previousZ: obs.z,
+        z: obs.z + difficulty.speed * delta,
+      };
 
-      // Simple collision zone check
-      if (!updatedObs.hit && updatedObs.z > -2 && updatedObs.z < 1) {
-        // Check against all players
+      if (!updatedObs.hit) {
         for (let i = 0; i < pArray.length; i++) {
           const p = pArray[i];
           const xPos = pArray.length === 1 ? 0 : (i === 0 ? -2 : 2);
+          const orientation = playerOrientations.current[p.id];
 
-          // Check if obstacle is near this player's X position
-          if (Math.abs(updatedObs.x - xPos) < 1.2) {
-            const ori = playerOrientations.current[p.id];
-            // alpha arrives already wrapped to -180..180 from the controller.
-            // If the player is swinging their phone aggressively (angle > 30 degrees)
-            if (ori && (Math.abs(ori.beta) > 30 || Math.abs(ori.gamma) > 30 || Math.abs(ori.alpha) > 40)) {
-              updatedObs.hit = true;
-              hitPlayerIds.push(p.id);
-              onBurst({ x: updatedObs.x, y: updatedObs.y, z: updatedObs.z, color: updatedObs.color });
-              break;
-            }
+          // Use the exact same blade pose as Sword.jsx. This keeps collision aligned
+          // with what the player sees, including fast obstacles crossing between frames.
+          if (orientation && swordHitsObstacle({
+            swordX: xPos,
+            orientation,
+            obstacle: updatedObs,
+          })) {
+            updatedObs.hit = true;
+            hitPlayerIds.push(p.id);
+            hitEffects.current?.spawn({
+              x: updatedObs.x,
+              y: updatedObs.y,
+              z: updatedObs.z,
+              color: updatedObs.color,
+            });
+            break;
           }
         }
       }
       return updatedObs;
-    }).filter(obs => !obs.hit && obs.z < 10);
+    }).filter(obs => {
+      if (obs.hit) return false;
+      if (obs.z >= 10) {
+        if (obs.targetPlayerId) missedPlayerIds.push(obs.targetPlayerId);
+        return false;
+      }
+      return true;
+    });
 
     obstaclesRef.current = next;
     setObstacles(next);
 
     if (onHit) {
       for (const id of hitPlayerIds) onHit(id);
+    }
+    hitCountRef.current += hitPlayerIds.length;
+    if (onMiss) {
+      for (const id of missedPlayerIds) onMiss(id);
     }
   });
 
@@ -151,24 +148,14 @@ const ObstaclesManager = ({ players, playerOrientations, onHit, onBurst }) => {
   );
 };
 
-// Glowing synthwave sun sitting on the horizon.
-const SynthwaveSun = () => {
-  return (
-    <mesh position={[0, 6, -70]}>
-      <circleGeometry args={[18, 64]} />
-      <meshBasicMaterial color="#ff2d95" toneMapped={false} />
-    </mesh>
-  );
-};
-
 // Animated Synthwave Grid Ground
-const MovingGrid = ({ color, y }) => {
+const MovingGrid = ({ color, y, speed }) => {
   const gridRef = useRef();
 
   useFrame((state, delta) => {
     // move the grid towards the camera to simulate forward motion
     if (gridRef.current) {
-      gridRef.current.position.z = (gridRef.current.position.z + 25 * delta) % 10;
+      gridRef.current.position.z = (gridRef.current.position.z + speed * delta) % 10;
     }
   });
 
@@ -180,19 +167,39 @@ const MovingGrid = ({ color, y }) => {
   );
 };
 
-const GameScene = ({ players, playerOrientations, onHit }) => {
+const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
   const playersArray = Object.values(players);
-  const [bursts, setBursts] = useState([]);
-
-  const addBurst = (b) => {
-    setBursts(prev => [...prev, { ...b, id: Math.random() }]);
-  };
-  const removeBurst = (id) => {
-    setBursts(prev => prev.filter(b => b.id !== id));
-  };
+  const hitEffectsRef = useRef();
+  const [difficulty, setDifficulty] = useState(() => getDifficulty(0, 0));
 
   return (
     <div className="canvas-container">
+      <div
+        aria-label={`Difficulty level ${difficulty.level}${difficulty.isRush ? ', rush active' : ''}`}
+        style={{
+          position: 'absolute',
+          top: '1.25rem',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 20,
+          pointerEvents: 'none',
+          textAlign: 'center',
+          fontFamily: 'Orbitron, sans-serif',
+          fontWeight: 900,
+          letterSpacing: '0.18em',
+          color: difficulty.isRush ? '#ffdd00' : '#00f3ff',
+          textShadow: difficulty.isRush
+            ? '0 0 8px #ff0055, 0 0 24px #ffdd00'
+            : '0 0 14px #00f3ff',
+        }}
+      >
+        <div style={{ fontSize: '1rem', opacity: 0.9 }}>LEVEL {difficulty.level}</div>
+        {difficulty.isRush && (
+          <div style={{ marginTop: '0.2rem', fontSize: '2rem', color: '#ffdd00' }}>
+            RUSH!
+          </div>
+        )}
+      </div>
       <Canvas camera={{ position: [0, 2, 8], fov: 60 }} dpr={[1, 2]}>
         <color attach="background" args={['#0a0018']} />
         {/* Synthwave foggy atmosphere */}
@@ -203,29 +210,30 @@ const GameScene = ({ players, playerOrientations, onHit }) => {
         <pointLight position={[0, 2, 5]} intensity={2.5} color="#ff007f" />
         <pointLight position={[0, 8, -60]} intensity={4} color="#ff2d95" distance={120} />
 
-        <Stars radius={120} depth={60} count={5000} factor={5} saturation={1} fade speed={1.5} />
-
-        <SynthwaveSun />
+        <Stars
+          radius={120}
+          depth={60}
+          count={5000}
+          factor={5}
+          saturation={1}
+          fade
+          speed={difficulty.isRush ? 3 : 1.5}
+        />
 
         {/* Floor grid plus a faint mirrored ceiling grid for a tunnel feel */}
-        <MovingGrid color="#ff007f" y={-2} />
-        <MovingGrid color="#00f3ff" y={8} />
+        <MovingGrid color="#ff007f" y={-2} speed={difficulty.speed} />
+        <MovingGrid color="#00f3ff" y={8} speed={difficulty.speed} />
 
         <ObstaclesManager
           players={players}
           playerOrientations={playerOrientations}
           onHit={onHit}
-          onBurst={addBurst}
+          onMiss={onMiss}
+          hitEffects={hitEffectsRef}
+          onDifficultyChange={setDifficulty}
         />
 
-        {bursts.map(b => (
-          <HitBurst
-            key={b.id}
-            position={[b.x, b.y, b.z]}
-            color={b.color}
-            onDone={() => removeBurst(b.id)}
-          />
-        ))}
+        <HitEffects ref={hitEffectsRef} />
 
         {playersArray.map((player, index) => (
           <Sword
@@ -239,10 +247,15 @@ const GameScene = ({ players, playerOrientations, onHit }) => {
 
         {/* Post-Processing stack for the neon synthwave look */}
         <EffectComposer disableNormalPass>
-          <Bloom luminanceThreshold={0.8} mipmapBlur intensity={2.4} radius={0.85} />
+          <Bloom
+            luminanceThreshold={0.8}
+            mipmapBlur
+            intensity={difficulty.isRush ? 3 : 2.4}
+            radius={0.85}
+          />
           <ChromaticAberration
             blendFunction={BlendFunction.NORMAL}
-            offset={[0.0009, 0.0012]}
+            offset={difficulty.isRush ? [0.0022, 0.0028] : [0.0009, 0.0012]}
           />
           <Scanline blendFunction={BlendFunction.OVERLAY} density={1.3} opacity={0.12} />
           <Vignette eskil={false} offset={0.25} darkness={0.9} />
@@ -252,4 +265,4 @@ const GameScene = ({ players, playerOrientations, onHit }) => {
   );
 };
 
-export default GameScene;
+export default React.memo(GameScene);

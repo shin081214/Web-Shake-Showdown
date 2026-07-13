@@ -2,25 +2,34 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { Smartphone } from 'lucide-react';
+import { createOrientationPublisher } from '../orientationTransport';
+import { createScreenWakeLock } from '../screenWakeLock';
+import { vibrateOnHit } from '../hitHaptics';
 
 const BACKEND_URL = '/';
 
 const ControllerView = () => {
   const [searchParams] = useSearchParams();
   const roomIdFromUrl = searchParams.get('roomId');
-  
+
   const [roomId, setRoomId] = useState(roomIdFromUrl || '');
   const [status, setStatus] = useState('disconnected'); // disconnected, connected, error
   const [orientation, setOrientation] = useState({ alpha: 0, beta: 0, gamma: 0 });
   const [color, setColor] = useState('#fff');
   const [errorMsg, setErrorMsg] = useState('');
   const [eventCount, setEventCount] = useState(0); // Debug counter
-  
+
   const roomIdRef = useRef(roomId);
   const socketRef = useRef(null);
-  const lastEmitTime = useRef(0);
+  const publishOrientationRef = useRef(null);
+  const wakeLockRef = useRef(null);
+  const lastUiUpdateTime = useRef(0);
+  const eventCountRef = useRef(0);
   const rawOrientationRef = useRef({ alpha: 0, beta: 0, gamma: 0 });
   const offsetRef = useRef({ alpha: 0, beta: 0, gamma: 0 });
+
+  if (!publishOrientationRef.current) publishOrientationRef.current = createOrientationPublisher();
+  if (!wakeLockRef.current) wakeLockRef.current = createScreenWakeLock();
 
   useEffect(() => {
     roomIdRef.current = roomId;
@@ -46,18 +55,20 @@ const ControllerView = () => {
       beta: rawOrientationRef.current.beta,
       gamma: rawOrientationRef.current.gamma
     };
-    
-    setOrientation(data);
-    setEventCount(c => c + 1); // Increment debug counter
-    
-    // Throttle emit to ~30fps to prevent WebSocket flooding
-    const now = Date.now();
-    if (now - lastEmitTime.current > 33) {
-      lastEmitTime.current = now;
-      if (socketRef.current) {
-        socketRef.current.emit('orientation', { roomId: roomIdRef.current, data });
-      }
+
+    eventCountRef.current += 1;
+
+    // Keep diagnostic React renders infrequent. Sensor input still travels at up
+    // to 60fps below, without making the controller UI compete for the main thread.
+    const now = performance.now();
+    if (now - lastUiUpdateTime.current >= 100) {
+      lastUiUpdateTime.current = now;
+      setOrientation(data);
+      setEventCount(eventCountRef.current);
     }
+
+    // Volatile transport drops stale frames instead of letting old movement queue up.
+    publishOrientationRef.current(socketRef.current, roomIdRef.current, data);
   }, []);
 
   const calibrate = () => {
@@ -70,11 +81,16 @@ const ControllerView = () => {
       if (socketRef.current) {
         socketRef.current.disconnect();
       }
+      void wakeLockRef.current?.stop();
       window.removeEventListener('deviceorientation', handleOrientation);
     };
   }, [handleOrientation]);
 
   const connectAndRequestPermission = async () => {
+    // Must begin from this tap on iOS. The lock is reacquired automatically when
+    // the page becomes visible again after an app switch.
+    void wakeLockRef.current.start();
+
     // iOS 13+ requires explicit permission for DeviceOrientation
     if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
       try {
@@ -110,7 +126,7 @@ const ControllerView = () => {
     if (socketRef.current) {
       socketRef.current.disconnect();
     }
-    socketRef.current = io(BACKEND_URL);
+    socketRef.current = io(BACKEND_URL, { transports: ['websocket'] });
     const socket = socketRef.current;
 
     socket.on('connect', () => {
@@ -122,15 +138,31 @@ const ControllerView = () => {
       setColor(data.color);
     });
 
+    socket.on('hit_feedback', () => {
+      vibrateOnHit();
+    });
+
     socket.on('room_error', (msg) => {
       setStatus('error');
       setErrorMsg(msg);
+      void wakeLockRef.current.stop();
+      socket.disconnect();
+    });
+
+    socket.on('game_ended', () => {
+      roomIdRef.current = '';
+      setRoomId('');
+      setStatus('disconnected');
+      setErrorMsg('게임이 종료되었습니다. 화면의 새 QR 코드를 스캔하세요.');
+      window.removeEventListener('deviceorientation', handleOrientation);
+      void wakeLockRef.current.stop();
       socket.disconnect();
     });
 
     socket.on('host_disconnected', () => {
       setStatus('disconnected');
       setErrorMsg('Host disconnected. Game over.');
+      void wakeLockRef.current.stop();
       socket.disconnect();
     });
   };
@@ -141,25 +173,25 @@ const ControllerView = () => {
         <div className="glass-panel" style={{ width: '90%', maxWidth: '400px' }}>
           <Smartphone size={64} color="var(--primary)" />
           <h2 className="title" style={{ fontSize: '2rem' }}>Controller</h2>
-          
-          <input 
-            type="text" 
-            placeholder="Room ID" 
+
+          <input
+            type="text"
+            placeholder="Room ID"
             value={roomId}
             onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-            style={{ 
-              padding: '1rem', 
-              fontSize: '1.5rem', 
-              textAlign: 'center', 
-              borderRadius: '10px', 
+            style={{
+              padding: '1rem',
+              fontSize: '1.5rem',
+              textAlign: 'center',
+              borderRadius: '10px',
               border: 'none',
               width: '100%',
               textTransform: 'uppercase'
             }}
           />
-          
+
           {errorMsg && <p style={{ color: '#ff3333' }}>{errorMsg}</p>}
-          
+
           <button className="btn" onClick={connectAndRequestPermission} style={{ width: '100%' }}>
             Connect & Play
           </button>
@@ -168,7 +200,7 @@ const ControllerView = () => {
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: '#fff', textShadow: '0 0 10px rgba(0,0,0,0.8)' }}>
           <h1 style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '4rem', fontWeight: 900, color: 'var(--primary)', textShadow: '0 0 20px var(--primary)' }}>SWING!</h1>
           <p style={{ fontSize: '1.5rem', marginTop: '1rem', fontWeight: 700, color: 'var(--secondary)', textShadow: '0 0 10px var(--secondary)' }}>CONNECTED</p>
-          
+
           <div className="sensor-data" style={{ color: 'rgba(255,255,255,0.8)', background: 'rgba(0,0,0,0.5)', padding: '10px', borderRadius: '4px', border: '1px solid var(--secondary)' }}>
             α: {orientation.alpha?.toFixed(1)}°<br/>
             β: {orientation.beta?.toFixed(1)}°<br/>

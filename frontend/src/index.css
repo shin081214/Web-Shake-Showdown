@@ -59,7 +59,7 @@ body {
   color: var(--text-color);
   text-transform: uppercase;
   letter-spacing: 2px;
-  text-shadow: 
+  text-shadow:
     0 0 5px #fff,
     0 0 10px #fff,
     0 0 20px var(--primary),
@@ -125,7 +125,7 @@ body {
   letter-spacing: 12px;
   font-weight: 900;
   color: var(--primary);
-  text-shadow: 
+  text-shadow:
     0 0 5px #fff,
     0 0 10px var(--primary),
     0 0 20px var(--primary),
@@ -182,7 +182,7 @@ body {
   font-size: 3rem;
   font-weight: 900;
   color: white;
-  text-shadow: 
+  text-shadow:
     0 0 10px currentColor,
     0 0 20px currentColor,
     0 0 40px currentColor;
