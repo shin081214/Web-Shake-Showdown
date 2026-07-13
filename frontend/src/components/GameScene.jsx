@@ -12,75 +12,84 @@ import { BlendFunction } from 'postprocessing';
 import Sword from './Sword';
 import HitEffects from './HitEffects';
 import { swordHitsObstacle } from '../gameLogic';
-import { getDifficulty } from '../difficulty';
+import { getMusicTime } from '../audio';
+import {
+  NOTE_LEAD_SECONDS,
+  NOTE_MISS_Z,
+  NOTE_SPEED,
+  TOXIC_BPM,
+  TOXIC_NOTES,
+  TOXIC_SONG_DURATION,
+  formatSongTime,
+  getBeatmapSection,
+  getNoteZ,
+} from '../toxicBeatmap';
 
-// Component to handle obstacles logic
+// Schedule authored notes against the audio element's playback time. Deriving Z from
+// an absolute song clock keeps every cube on beat even after a slow render frame.
 const ObstaclesManager = ({
   players,
   playerOrientations,
   onHit,
   onMiss,
   hitEffects,
-  onDifficultyChange,
+  onMapStatusChange,
 }) => {
   const [obstacles, setObstacles] = useState([]);
   const obstaclesRef = useRef([]);
-  const timeRef = useRef(0);
-  const elapsedRef = useRef(0);
-  const hitCountRef = useRef(0);
-  const lastDifficultyRef = useRef(null);
+  const nextNoteIndexRef = useRef(0);
+  const lastStatusKeyRef = useRef(null);
 
-  useFrame((state, delta) => {
-    timeRef.current += delta;
-    elapsedRef.current += delta;
-    const difficulty = getDifficulty(elapsedRef.current, hitCountRef.current * 10);
-    const lastDifficulty = lastDifficultyRef.current;
-    if (
-      !lastDifficulty
-      || lastDifficulty.level !== difficulty.level
-      || lastDifficulty.isRush !== difficulty.isRush
-    ) {
-      lastDifficultyRef.current = difficulty;
-      onDifficultyChange?.(difficulty);
+  useFrame(() => {
+    const songTime = getMusicTime();
+    const section = getBeatmapSection(songTime);
+    const statusKey = `${section.name}:${Math.floor(songTime)}`;
+    if (lastStatusKeyRef.current !== statusKey) {
+      lastStatusKeyRef.current = statusKey;
+      onMapStatusChange?.({ section, songTime });
     }
 
     let next = obstaclesRef.current;
+    const playerArray = Object.values(players);
+    const spawned = [];
 
-    // Spawn new obstacle
-    if (timeRef.current > difficulty.spawnRate) {
-      timeRef.current = 0;
+    while (
+      playerArray.length > 0
+      && nextNoteIndexRef.current < TOXIC_NOTES.length
+      && TOXIC_NOTES[nextNoteIndexRef.current].time - songTime <= NOTE_LEAD_SECONDS
+    ) {
+      const noteIndex = nextNoteIndexRef.current;
+      const note = TOXIC_NOTES[noteIndex];
+      const targetIndex = noteIndex % playerArray.length;
+      const targetPlayer = playerArray[targetIndex];
+      const playerCenter = playerArray.length === 1 ? 0 : (targetIndex === 0 ? -2 : 2);
+      const laneSpacing = playerArray.length === 1 ? 2.15 : 1.1;
 
-      const x = (Math.random() - 0.5) * 8; // Random lane
-      const z = -60; // Start far away
-
-      const playerArray = Object.values(players);
-      const targetPlayer = playerArray.length > 0
-        ? playerArray[Math.floor(Math.random() * playerArray.length)]
-        : null;
-      const color = targetPlayer?.color ?? '#00f3ff'; // Default neon cyan
-
-      next = [...next, {
-        id: Math.random(),
-        x,
+      spawned.push({
+        ...note,
+        id: note.id,
+        x: playerCenter + note.lane * laneSpacing,
         y: 0,
-        z,
-        color,
-        targetPlayerId: targetPlayer?.id,
+        z: getNoteZ(note.time, songTime),
+        color: targetPlayer.color,
+        targetPlayerId: targetPlayer.id,
         hit: false,
-      }];
+      });
+      nextNoteIndexRef.current += 1;
     }
+    if (spawned.length > 0) next = [...next, ...spawned];
 
     // Move obstacles and check collisions. State is driven from a ref instead of a
     // setState updater so this stays free of side effects: under StrictMode the
     // updater runs twice, which previously double-counted every hit.
     const hitPlayerIds = [];
     const missedPlayerIds = [];
-    const pArray = Object.values(players);
+    const pArray = playerArray;
     next = next.map(obs => {
       let updatedObs = {
         ...obs,
         previousZ: obs.z,
-        z: obs.z + difficulty.speed * delta,
+        z: getNoteZ(obs.time, songTime),
       };
 
       if (!updatedObs.hit) {
@@ -111,7 +120,7 @@ const ObstaclesManager = ({
       return updatedObs;
     }).filter(obs => {
       if (obs.hit) return false;
-      if (obs.z >= 10) {
+      if (obs.z >= NOTE_MISS_Z) {
         if (obs.targetPlayerId) missedPlayerIds.push(obs.targetPlayerId);
         return false;
       }
@@ -124,7 +133,6 @@ const ObstaclesManager = ({
     if (onHit) {
       for (const id of hitPlayerIds) onHit(id);
     }
-    hitCountRef.current += hitPlayerIds.length;
     if (onMiss) {
       for (const id of missedPlayerIds) onMiss(id);
     }
@@ -133,7 +141,12 @@ const ObstaclesManager = ({
   return (
     <group>
       {obstacles.map(obs => (
-        <mesh key={obs.id} position={[obs.x, obs.y, obs.z]} rotation={[obs.z * 0.1, obs.z * 0.1, 0]}>
+        <mesh
+          key={obs.id}
+          position={[obs.x, obs.y, obs.z]}
+          rotation={[obs.z * 0.1, obs.z * 0.1, obs.accent ? Math.PI / 4 : 0]}
+          scale={obs.accent ? 1.24 : 1}
+        >
           <boxGeometry args={[1, 1, 1]} />
           <meshStandardMaterial
             color={obs.color}
@@ -170,12 +183,16 @@ const MovingGrid = ({ color, y, speed }) => {
 const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
   const playersArray = Object.values(players);
   const hitEffectsRef = useRef();
-  const [difficulty, setDifficulty] = useState(() => getDifficulty(0, 0));
+  const [mapStatus, setMapStatus] = useState(() => ({
+    section: getBeatmapSection(0),
+    songTime: 0,
+  }));
+  const { section, songTime } = mapStatus;
 
   return (
     <div className="canvas-container">
       <div
-        aria-label={`Difficulty level ${difficulty.level}${difficulty.isRush ? ', rush active' : ''}`}
+        aria-label={`Toxic ${section.name}, level ${section.level}${section.isRush ? ', rush active' : ''}`}
         style={{
           position: 'absolute',
           top: '1.25rem',
@@ -187,14 +204,19 @@ const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
           fontFamily: 'Orbitron, sans-serif',
           fontWeight: 900,
           letterSpacing: '0.18em',
-          color: difficulty.isRush ? '#ffdd00' : '#00f3ff',
-          textShadow: difficulty.isRush
+          color: section.isRush ? '#ffdd00' : '#00f3ff',
+          textShadow: section.isRush
             ? '0 0 8px #ff0055, 0 0 24px #ffdd00'
             : '0 0 14px #00f3ff',
         }}
       >
-        <div style={{ fontSize: '1rem', opacity: 0.9 }}>LEVEL {difficulty.level}</div>
-        {difficulty.isRush && (
+        <div style={{ fontSize: '1rem', opacity: 0.9 }}>
+          TOXIC · {section.name} · LEVEL {section.level}
+        </div>
+        <div style={{ marginTop: '0.3rem', fontSize: '0.72rem', color: '#fff', opacity: 0.72 }}>
+          BoyWithUke · {formatSongTime(songTime)} / {formatSongTime(TOXIC_SONG_DURATION)} · {Math.round(TOXIC_BPM)} BPM
+        </div>
+        {section.isRush && (
           <div style={{ marginTop: '0.2rem', fontSize: '2rem', color: '#ffdd00' }}>
             RUSH!
           </div>
@@ -217,12 +239,12 @@ const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
           factor={5}
           saturation={1}
           fade
-          speed={difficulty.isRush ? 3 : 1.5}
+          speed={section.isRush ? 3 : 1.5}
         />
 
         {/* Floor grid plus a faint mirrored ceiling grid for a tunnel feel */}
-        <MovingGrid color="#ff007f" y={-2} speed={difficulty.speed} />
-        <MovingGrid color="#00f3ff" y={8} speed={difficulty.speed} />
+        <MovingGrid color="#ff007f" y={-2} speed={NOTE_SPEED * (section.isRush ? 1.08 : 1)} />
+        <MovingGrid color="#00f3ff" y={8} speed={NOTE_SPEED * (section.isRush ? 1.08 : 1)} />
 
         <ObstaclesManager
           players={players}
@@ -230,7 +252,7 @@ const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
           onHit={onHit}
           onMiss={onMiss}
           hitEffects={hitEffectsRef}
-          onDifficultyChange={setDifficulty}
+          onMapStatusChange={setMapStatus}
         />
 
         <HitEffects ref={hitEffectsRef} />
@@ -250,12 +272,12 @@ const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
           <Bloom
             luminanceThreshold={0.8}
             mipmapBlur
-            intensity={difficulty.isRush ? 3 : 2.4}
+            intensity={section.isRush ? 3 : 2.4}
             radius={0.85}
           />
           <ChromaticAberration
             blendFunction={BlendFunction.NORMAL}
-            offset={difficulty.isRush ? [0.0022, 0.0028] : [0.0009, 0.0012]}
+            offset={section.isRush ? [0.0022, 0.0028] : [0.0009, 0.0012]}
           />
           <Scanline blendFunction={BlendFunction.OVERLAY} density={1.3} opacity={0.12} />
           <Vignette eskil={false} offset={0.25} darkness={0.9} />

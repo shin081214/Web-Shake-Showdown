@@ -2,7 +2,7 @@ import React, { startTransition, useCallback, useEffect, useState, useRef } from
 import { io } from 'socket.io-client';
 import { QRCodeSVG } from 'qrcode.react';
 import GameScene from '../components/GameScene';
-import { initAudio, playHit } from '../audio';
+import { playHit, startMusic, stopMusic } from '../audio';
 import {
   GAME_RESULT_DURATION_MS,
   INITIAL_LIVES,
@@ -22,6 +22,7 @@ const HostView = () => {
   const [lives, setLives] = useState({});
   const [gameState, setGameState] = useState('waiting'); // waiting, playing, finished
   const [finalResults, setFinalResults] = useState([]);
+  const [audioError, setAudioError] = useState(null);
   const [resultSecondsLeft, setResultSecondsLeft] = useState(
     () => Math.ceil(GAME_RESULT_DURATION_MS / 1000)
   );
@@ -31,6 +32,7 @@ const HostView = () => {
   const livesRef = useRef({});
   const scoresRef = useRef({});
   const replacingRoomRef = useRef(false);
+  const finishGameRef = useRef(() => {});
   // Use a ref for high-frequency orientation data to avoid re-rendering HostView 60 times a second
   const playerOrientations = useRef({});
 
@@ -102,6 +104,7 @@ const HostView = () => {
     });
 
     return () => {
+      stopMusic();
       socket.disconnect();
     };
   }, []);
@@ -141,16 +144,38 @@ const HostView = () => {
     };
   }, [gameState]);
 
+  const finishGame = useCallback(() => {
+    if (replacingRoomRef.current) return;
+    replacingRoomRef.current = true;
+    stopMusic();
+    setFinalResults(Object.values(players).map((player, index) => ({
+      id: player.id,
+      color: player.color,
+      label: `P${index + 1}`,
+      score: scoresRef.current[player.id] ?? 0,
+    })));
+    setGameState('finished');
+  }, [players]);
+  finishGameRef.current = finishGame;
+
   const startGame = () => {
     const playerIds = Object.keys(players);
     const resetLives = createPlayerLives(playerIds);
     const resetScores = Object.fromEntries(playerIds.map(playerId => [playerId, 0]));
+    replacingRoomRef.current = false;
     livesRef.current = resetLives;
     scoresRef.current = resetScores;
     setLives(resetLives);
     setScores(resetScores);
     setFinalResults([]);
-    initAudio();
+    setAudioError(null);
+    void startMusic(() => finishGameRef.current()).catch(error => {
+      console.error('Could not start Toxic:', error);
+      stopMusic();
+      replacingRoomRef.current = false;
+      setAudioError('음악을 재생하지 못했습니다. 브라우저 오디오 권한을 확인한 뒤 다시 시작해 주세요.');
+      setGameState('waiting');
+    });
     setGameState('playing');
   };
 
@@ -173,19 +198,12 @@ const HostView = () => {
     livesRef.current = nextLives;
     setLives(nextLives);
     const nextGameState = getGameStateAfterMiss(nextLives, playerId);
-    if (nextGameState === 'finished' && !replacingRoomRef.current) {
-      replacingRoomRef.current = true;
-      setFinalResults(Object.values(players).map((player, index) => ({
-        id: player.id,
-        color: player.color,
-        label: `P${index + 1}`,
-        score: scoresRef.current[player.id] ?? 0,
-      })));
-      setGameState('finished');
+    if (nextGameState === 'finished') {
+      finishGame();
       return;
     }
     setGameState(nextGameState);
-  }, [players]);
+  }, [finishGame]);
 
   const joinUrl = `${window.location.protocol}//${window.location.host}/join?roomId=${roomId}`;
 
@@ -195,6 +213,11 @@ const HostView = () => {
         <div className="glass-panel">
           <h1 className="title">Web-Shake Showdown</h1>
           <p className="subtitle">Scan to join with your smartphone</p>
+          {audioError && (
+            <p role="alert" style={{ color: '#ff5577', maxWidth: '32rem' }}>
+              {audioError}
+            </p>
+          )}
 
           {roomId ? (
             <>

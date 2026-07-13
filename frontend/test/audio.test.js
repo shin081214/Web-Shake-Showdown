@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initAudio, playHitSound } from '../src/audio.js';
+import {
+  getMusicTime,
+  initAudio,
+  playHitSound,
+  startMusic,
+  stopMusic,
+} from '../src/audio.js';
+import { TOXIC_SONG_URL } from '../src/toxicBeatmap.js';
 
 class AudioNode {
   connect(target) {
@@ -11,6 +18,7 @@ class AudioNode {
 function createAudioHarness() {
   const oscillators = [];
   const bufferSources = [];
+  const audioElements = [];
 
   class FakeAudioContext {
     constructor() {
@@ -64,7 +72,34 @@ function createAudioHarness() {
     }
   }
 
-  return { FakeAudioContext, oscillators, bufferSources };
+  class FakeAudio {
+    constructor(source) {
+      this.source = source;
+      this.currentTime = 0;
+      this.listeners = new Map();
+      audioElements.push(this);
+    }
+
+    addEventListener(event, listener) {
+      this.listeners.set(event, listener);
+    }
+
+    removeEventListener(event, listener) {
+      if (this.listeners.get(event) === listener) this.listeners.delete(event);
+    }
+
+    pause() {
+      this.paused = true;
+    }
+
+    play() {
+      this.played = true;
+      this.paused = false;
+      return Promise.resolve();
+    }
+  }
+
+  return { FakeAudioContext, FakeAudio, audioElements, oscillators, bufferSources };
 }
 
 test('a hit starts a noise crack and multiple ringing glass fragments', () => {
@@ -81,19 +116,44 @@ test('a hit starts a noise crack and multiple ringing glass fragments', () => {
   assert.equal(oscillators.every(oscillator => oscillator.stopped), true);
 });
 
-test('initializing audio does not start any background music', () => {
-  const { FakeAudioContext, oscillators } = createAudioHarness();
+test('initializing Web Audio does not start the song before the game starts', () => {
+  const { FakeAudioContext, FakeAudio, audioElements, oscillators } = createAudioHarness();
   const originalWindow = globalThis.window;
   const originalSetInterval = globalThis.setInterval;
 
-  globalThis.window = { AudioContext: FakeAudioContext };
+  globalThis.window = { AudioContext: FakeAudioContext, Audio: FakeAudio };
   globalThis.setInterval = () => 1;
 
   try {
     initAudio();
     assert.equal(oscillators.length, 0);
+    assert.equal(audioElements.length, 0);
   } finally {
     globalThis.window = originalWindow;
     globalThis.setInterval = originalSetInterval;
+  }
+});
+
+test('the Toxic track starts at zero and exposes its playback time as the map clock', async () => {
+  const { FakeAudioContext, FakeAudio, audioElements } = createAudioHarness();
+  const originalWindow = globalThis.window;
+  globalThis.window = { AudioContext: FakeAudioContext, Audio: FakeAudio };
+
+  try {
+    await startMusic();
+
+    assert.equal(audioElements.length, 1);
+    assert.equal(audioElements[0].source, TOXIC_SONG_URL);
+    assert.equal(audioElements[0].played, true);
+    assert.equal(audioElements[0].currentTime, 0);
+
+    audioElements[0].currentTime = 42.5;
+    assert.equal(getMusicTime(), 42.5);
+
+    stopMusic();
+    assert.equal(audioElements[0].paused, true);
+    assert.equal(audioElements[0].currentTime, 0);
+  } finally {
+    globalThis.window = originalWindow;
   }
 });

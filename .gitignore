@@ -34,3 +34,6 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+# Local source media (optimized runtime copy lives in frontend/public/audio)
+BoyWithUke- Toxic.flac

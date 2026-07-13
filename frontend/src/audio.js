@@ -1,10 +1,16 @@
-// Lightweight hit-only audio engine. Background music is intentionally disabled.
-// The glass shatter is synthesized once from reusable noise plus short resonant tones.
+import { TOXIC_SONG_URL } from './toxicBeatmap.js';
+
+// The song uses an HTML audio element for a stable, seekable gameplay clock. Hit
+// sounds stay in Web Audio so several glass bursts can overlap without restarting it.
 
 let audioCtx = null;
 let masterGain = null;
 let glassNoiseBuffer = null;
 let started = false;
+let music = null;
+let musicEndedHandler = null;
+
+const MUSIC_VOLUME = 0.68;
 
 function ctx() {
   if (!audioCtx) {
@@ -36,6 +42,21 @@ function createGlassNoiseBuffer(context) {
 function getGlassNoiseBuffer(context) {
   if (!glassNoiseBuffer) glassNoiseBuffer = createGlassNoiseBuffer(context);
   return glassNoiseBuffer;
+}
+
+function getMusic() {
+  if (!music) {
+    music = new window.Audio(TOXIC_SONG_URL);
+    music.preload = 'auto';
+    music.volume = MUSIC_VOLUME;
+  }
+  return music;
+}
+
+function clearMusicEndedHandler() {
+  if (!music || !musicEndedHandler) return;
+  music.removeEventListener('ended', musicEndedHandler);
+  musicEndedHandler = null;
 }
 
 export function playHitSound(context, output = masterGain) {
@@ -75,12 +96,39 @@ export function playHitSound(context, output = masterGain) {
   });
 }
 
-/** Unlock audio on the host's Start Game click. No background audio is started. */
+/** Unlock Web Audio on the host's Start Game click. */
 export function initAudio() {
   if (started) return;
   started = true;
   const context = ctx();
   getGlassNoiseBuffer(context);
+}
+
+/** Start Toxic from the beginning and use it as the authoritative beatmap clock. */
+export async function startMusic(onEnded) {
+  initAudio();
+  const track = getMusic();
+  track.pause();
+  track.currentTime = 0;
+  clearMusicEndedHandler();
+
+  if (onEnded) {
+    musicEndedHandler = onEnded;
+    track.addEventListener('ended', musicEndedHandler, { once: true });
+  }
+
+  await track.play();
+}
+
+export function stopMusic() {
+  if (!music) return;
+  clearMusicEndedHandler();
+  music.pause();
+  music.currentTime = 0;
+}
+
+export function getMusicTime() {
+  return music?.currentTime ?? 0;
 }
 
 /** Play the glass-shatter hit effect. Safe to call before explicit initialization. */
