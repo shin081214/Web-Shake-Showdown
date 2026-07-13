@@ -1,11 +1,16 @@
 const express = require('express');
 const http = require('http');
+const path = require('node:path');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const { mountProductionFrontend } = require('./productionFrontend');
 const { createRoom, replaceRoom } = require('./roomManager');
 
 const app = express();
 app.use(cors());
+mountProductionFrontend(app, {
+  distPath: process.env.FRONTEND_DIST_PATH || path.resolve(__dirname, '../frontend/dist'),
+});
 
 const server = http.createServer(app);
 const io = new Server(server, {
