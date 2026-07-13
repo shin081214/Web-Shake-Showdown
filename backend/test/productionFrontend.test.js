@@ -31,12 +31,23 @@ async function createDist(t) {
 }
 
 test('health endpoint reports that the service is ready', async (t) => {
-  const baseUrl = await startApp(t);
+  const distPath = await createDist(t);
+  const baseUrl = await startApp(t, distPath);
 
   const response = await fetch(`${baseUrl}/health`);
 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { status: 'ok' });
+});
+
+test('health endpoint reports unavailable when the frontend entry point is missing', async (t) => {
+  const missingDistPath = path.join(os.tmpdir(), `missing-web-shake-dist-${process.pid}`);
+  const baseUrl = await startApp(t, missingDistPath);
+
+  const response = await fetch(`${baseUrl}/health`);
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { status: 'unavailable' });
 });
 
 test('built frontend assets are served from the configured dist directory', async (t) => {
@@ -58,5 +69,16 @@ test('client-side routes fall back to the frontend entry point', async (t) => {
 
   assert.equal(response.status, 200);
   assert.equal(await response.text(), '<main>Web-Shake Showdown</main>');
+  assert.match(response.headers.get('content-type'), /text\/html/);
+});
+
+test('HEAD requests for client-side routes use the frontend entry point', async (t) => {
+  const distPath = await createDist(t);
+  const baseUrl = await startApp(t, distPath);
+
+  const response = await fetch(`${baseUrl}/join?roomId=ABCD`, { method: 'HEAD' });
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), '');
   assert.match(response.headers.get('content-type'), /text\/html/);
 });

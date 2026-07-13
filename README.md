@@ -41,6 +41,8 @@ npm start --prefix backend
 
 백엔드는 `frontend/dist`를 정적 파일로 제공하며 `/join` 같은 클라이언트 라우트는 `index.html`로 폴백합니다. 기본 포트는 `3001`이고, 배포 환경에서는 `PORT`를 사용합니다. 헬스체크는 `/health`입니다.
 
+프로덕션 Socket.IO 연결은 기본적으로 현재 서비스와 동일한 Origin만 허용합니다. 별도 컨트롤러 도메인이 꼭 필요하면 `SOCKET_ALLOWED_ORIGINS`에 허용할 Origin을 쉼표로 구분해 설정합니다. `*`는 모든 Origin을 허용하므로 공개 운영 환경에서는 사용하지 마세요.
+
 ## Render 배포
 
 루트의 `render.yaml`로 프런트엔드와 Socket.IO 서버를 단일 Web Service에 배포합니다.
