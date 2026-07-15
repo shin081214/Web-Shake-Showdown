@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { Smartphone } from 'lucide-react';
+import AlignmentGuide from '../components/AlignmentGuide';
 import { createOrientationPublisher } from '../orientationTransport';
 import { createScreenWakeLock } from '../screenWakeLock';
 import { vibrateOnHit } from '../hitHaptics';
@@ -13,7 +14,8 @@ const ControllerView = () => {
   const roomIdFromUrl = searchParams.get('roomId');
 
   const [roomId, setRoomId] = useState(roomIdFromUrl || '');
-  const [status, setStatus] = useState('disconnected'); // disconnected, connected, error
+  const [status, setStatus] = useState('disconnected'); // disconnected, connecting, connected, error
+  const [alignmentStage, setAlignmentStage] = useState('idle'); // idle, aligning, ready
   const [orientation, setOrientation] = useState({ alpha: 0, beta: 0, gamma: 0 });
   const [color, setColor] = useState('#fff');
   const [errorMsg, setErrorMsg] = useState('');
@@ -71,8 +73,15 @@ const ControllerView = () => {
     publishOrientationRef.current(socketRef.current, roomIdRef.current, data);
   }, []);
 
-  const calibrate = () => {
+  const completeCalibration = () => {
     offsetRef.current = { ...rawOrientationRef.current };
+    setAlignmentStage('ready');
+    socketRef.current?.emit('calibration_completed', { roomId: roomIdRef.current });
+  };
+
+  const beginCalibration = () => {
+    setAlignmentStage('aligning');
+    socketRef.current?.emit('calibration_started', { roomId: roomIdRef.current });
   };
 
   useEffect(() => {
@@ -101,11 +110,11 @@ const ControllerView = () => {
           window.addEventListener('deviceorientation', handleOrientation);
           connectToServer();
         } else {
-          setErrorMsg('Permission denied for device orientation.');
+          setErrorMsg('동작 센서 권한이 필요합니다. 권한을 허용해주세요.');
         }
       } catch (err) {
         console.error(err);
-        setErrorMsg('Error requesting orientation permission. Must be over HTTPS.');
+        setErrorMsg('동작 센서를 사용할 수 없습니다. 보안 연결로 다시 접속해주세요.');
       }
     } else {
       // Non iOS 13+ devices
@@ -117,7 +126,7 @@ const ControllerView = () => {
 
   const connectToServer = () => {
     if (!roomId) {
-      setErrorMsg('Please enter a room ID');
+      setErrorMsg('방 코드를 입력해주세요.');
       return;
     }
 
@@ -136,6 +145,8 @@ const ControllerView = () => {
     socket.on('joined', (data) => {
       setStatus('connected');
       setColor(data.color);
+      setAlignmentStage('aligning');
+      socket.emit('calibration_started', { roomId: data.roomId });
     });
 
     socket.on('hit_feedback', () => {
@@ -153,6 +164,7 @@ const ControllerView = () => {
       roomIdRef.current = '';
       setRoomId('');
       setStatus('disconnected');
+      setAlignmentStage('idle');
       setErrorMsg('게임이 종료되었습니다. 화면의 새 QR 코드를 스캔하세요.');
       window.removeEventListener('deviceorientation', handleOrientation);
       void wakeLockRef.current.stop();
@@ -161,7 +173,7 @@ const ControllerView = () => {
 
     socket.on('host_disconnected', () => {
       setStatus('disconnected');
-      setErrorMsg('Host disconnected. Game over.');
+      setErrorMsg('컴퓨터 연결이 끊어져 게임이 종료되었습니다.');
       void wakeLockRef.current.stop();
       socket.disconnect();
     });
@@ -169,14 +181,15 @@ const ControllerView = () => {
 
   return (
     <div className="controller-ui" style={{ backgroundColor: status === 'connected' ? color : 'var(--bg-color)' }}>
-      {status === 'disconnected' || status === 'error' ? (
+      {status !== 'connected' ? (
         <div className="glass-panel" style={{ width: '90%', maxWidth: '400px' }}>
           <Smartphone size={64} color="var(--primary)" />
-          <h2 className="title" style={{ fontSize: '2rem' }}>Controller</h2>
+          <h2 className="title" style={{ fontSize: '2rem' }}>휴대폰 컨트롤러</h2>
 
           <input
             type="text"
-            placeholder="Room ID"
+            aria-label="방 코드"
+            placeholder="방 코드"
             value={roomId}
             onChange={(e) => setRoomId(e.target.value.toUpperCase())}
             style={{
@@ -190,22 +203,31 @@ const ControllerView = () => {
             }}
           />
 
-          {errorMsg && <p style={{ color: '#ff3333' }}>{errorMsg}</p>}
+          {errorMsg && <p style={{ color: '#ff5a78', textAlign: 'center' }}>{errorMsg}</p>}
 
-          <button className="btn" onClick={connectAndRequestPermission} style={{ width: '100%' }}>
-            Connect & Play
+          <button
+            className="btn"
+            onClick={connectAndRequestPermission}
+            disabled={status === 'connecting'}
+            style={{ width: '100%', opacity: status === 'connecting' ? 0.55 : 1 }}
+          >
+            {status === 'connecting' ? '연결하는 중...' : '연결하고 시작하기'}
           </button>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: '#fff', textShadow: '0 0 10px rgba(0,0,0,0.8)' }}>
-          <h1 style={{ fontFamily: 'Orbitron, sans-serif', fontSize: '4rem', fontWeight: 900, color: 'var(--primary)', textShadow: '0 0 20px var(--primary)' }}>SWING!</h1>
-          <p style={{ fontSize: '1.5rem', marginTop: '1rem', fontWeight: 700, color: 'var(--secondary)', textShadow: '0 0 10px var(--secondary)' }}>CONNECTED</p>
+          <h1 style={{ fontFamily: 'Orbitron, sans-serif', fontSize: 'clamp(2.8rem, 15vw, 4rem)', fontWeight: 900, color: '#fff', textShadow: '0 0 20px rgba(255,255,255,0.8)' }}>
+            휘두르세요!
+          </h1>
+          <p style={{ fontSize: '1.5rem', marginTop: '1rem', fontWeight: 700, color: '#fff' }}>
+            연결 완료
+          </p>
 
-          <div className="sensor-data" style={{ color: 'rgba(255,255,255,0.8)', background: 'rgba(0,0,0,0.5)', padding: '10px', borderRadius: '4px', border: '1px solid var(--secondary)' }}>
-            α: {orientation.alpha?.toFixed(1)}°<br/>
-            β: {orientation.beta?.toFixed(1)}°<br/>
-            γ: {orientation.gamma?.toFixed(1)}°<br/>
-            <span style={{ fontSize: '0.8rem', opacity: 0.5 }}>Events: {eventCount}</span>
+          <div className="sensor-data" style={{ color: 'rgba(255,255,255,0.9)', background: 'rgba(0,0,0,0.52)', padding: '10px 20px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.55)' }}>
+            좌우: {orientation.alpha?.toFixed(1)}°<br/>
+            앞뒤: {orientation.beta?.toFixed(1)}°<br/>
+            기울기: {orientation.gamma?.toFixed(1)}°<br/>
+            <span style={{ fontSize: '0.8rem', opacity: 0.65 }}>센서 감지: {eventCount}회</span>
           </div>
 
           <button
@@ -213,22 +235,30 @@ const ControllerView = () => {
               marginTop: '3rem',
               padding: '1rem 3rem',
               fontSize: '1.2rem',
-              fontWeight: 700,
+              fontWeight: 800,
               color: '#000',
-              backgroundColor: '#ffdd00',
+              backgroundColor: '#fff',
               border: 'none',
               borderRadius: '12px',
-              boxShadow: '0 0 20px rgba(255,221,0,0.5)',
+              boxShadow: '0 0 20px rgba(255,255,255,0.5)',
               cursor: 'pointer'
             }}
-            onClick={calibrate}
+            onClick={beginCalibration}
           >
-            정렬 (Calibrate)
+            휴대폰 위치 다시 맞추기
           </button>
-          <p style={{ marginTop: '1rem', fontSize: '0.9rem', opacity: 0.7, textAlign: 'center' }}>
-            화면을 향해 폰을 정면으로 들고<br/>정렬 버튼을 누르세요.
+          <p style={{ marginTop: '1rem', fontSize: '0.95rem', fontWeight: 700, opacity: 0.88, textAlign: 'center' }}>
+            위치 맞춤 완료 · 이제 휴대폰을 검처럼 움직이세요
           </p>
         </div>
+      )}
+
+      {status === 'connected' && alignmentStage === 'aligning' && (
+        <AlignmentGuide
+          mode="controller"
+          color={color}
+          onConfirm={completeCalibration}
+        />
       )}
     </div>
   );

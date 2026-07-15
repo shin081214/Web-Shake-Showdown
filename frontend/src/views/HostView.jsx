@@ -2,7 +2,17 @@ import React, { startTransition, useCallback, useEffect, useState, useRef } from
 import { io } from 'socket.io-client';
 import { QRCodeSVG } from 'qrcode.react';
 import GameScene from '../components/GameScene';
-import { playHit, startMusic, stopMusic } from '../audio';
+import AlignmentGuide from '../components/AlignmentGuide';
+import { pauseMusic, playHit, resumeMusic, startMusic, stopMusic } from '../audio';
+import { analyzeMusicTrack } from '../musicAnalysis';
+import { TOXIC_FALLBACK_BEATMAP } from '../toxicBeatmap';
+import {
+  CALIBRATION_ALIGNING,
+  CALIBRATION_READY,
+  getCalibrationSummary,
+  removePlayerCalibration,
+  setPlayerCalibration,
+} from '../calibrationState';
 import {
   GAME_RESULT_DURATION_MS,
   INITIAL_LIVES,
@@ -15,13 +25,27 @@ import {
 // Use relative path to leverage Vite's proxy
 const BACKEND_URL = '/';
 
+const ANALYSIS_MESSAGES = {
+  decoding: '음악 파일을 디코딩하고 있습니다…',
+  analyzing: 'Essentia.js가 BPM, 박자, 에너지를 자동 분석하고 있습니다…',
+  cached: '저장된 Essentia.js 분석 결과를 불러왔습니다.',
+  complete: 'Essentia.js 자동 분석이 완료되었습니다.',
+};
+
 const HostView = () => {
   const [roomId, setRoomId] = useState(null);
   const [players, setPlayers] = useState({});
   const [scores, setScores] = useState({});
   const [lives, setLives] = useState({});
+  const [playerCalibration, setPlayerCalibrationState] = useState({});
   const [gameState, setGameState] = useState('waiting'); // waiting, playing, finished
   const [finalResults, setFinalResults] = useState([]);
+  const [beatmap, setBeatmap] = useState(TOXIC_FALLBACK_BEATMAP);
+  const [analysisState, setAnalysisState] = useState({
+    phase: 'loading',
+    message: '음악 자동 분석을 준비하고 있습니다…',
+  });
+  const [selectedTrackName, setSelectedTrackName] = useState(TOXIC_FALLBACK_BEATMAP.title);
   const [audioError, setAudioError] = useState(null);
   const [resultSecondsLeft, setResultSecondsLeft] = useState(
     () => Math.ceil(GAME_RESULT_DURATION_MS / 1000)
@@ -33,8 +57,75 @@ const HostView = () => {
   const scoresRef = useRef({});
   const replacingRoomRef = useRef(false);
   const finishGameRef = useRef(() => {});
+  const analysisAbortRef = useRef(null);
+  const customSongUrlRef = useRef(null);
   // Use a ref for high-frequency orientation data to avoid re-rendering HostView 60 times a second
   const playerOrientations = useRef({});
+
+  const runMusicAnalysis = useCallback(({
+    songUrl,
+    audioFile,
+    title,
+    artist,
+    allowFallback,
+    storage,
+  }) => {
+    analysisAbortRef.current?.abort();
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
+    setAudioError(null);
+    setAnalysisState({ phase: 'loading', message: `${title} 분석을 준비하고 있습니다…` });
+
+    return analyzeMusicTrack({
+      songUrl,
+      audioFile,
+      title,
+      artist,
+      storage,
+      signal: controller.signal,
+      onStatus: phase => {
+        if (ANALYSIS_MESSAGES[phase]) {
+          setAnalysisState({ phase: 'loading', message: ANALYSIS_MESSAGES[phase] });
+        }
+      },
+    }).then(analyzedBeatmap => {
+      if (controller.signal.aborted) return;
+      setBeatmap(analyzedBeatmap);
+      setAnalysisState({
+        phase: 'ready',
+        message: `${analyzedBeatmap.title} · ${Math.round(analyzedBeatmap.bpm)} BPM · 노트 ${analyzedBeatmap.notes.length}개`,
+      });
+    }).catch(error => {
+      if (error.name === 'AbortError') return;
+      console.error('Essentia.js analysis failed:', error);
+      if (allowFallback) {
+        setBeatmap(TOXIC_FALLBACK_BEATMAP);
+        setAnalysisState({
+          phase: 'fallback',
+          message: '자동 분석에 실패해 검증된 기본 비트맵을 사용합니다.',
+        });
+        return;
+      }
+      setAnalysisState({
+        phase: 'error',
+        message: `${title}에서 안정적인 박자를 찾지 못했습니다. 다른 음악을 선택해 주세요.`,
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    void runMusicAnalysis({
+      songUrl: TOXIC_FALLBACK_BEATMAP.songUrl,
+      title: TOXIC_FALLBACK_BEATMAP.title,
+      artist: TOXIC_FALLBACK_BEATMAP.artist,
+      allowFallback: true,
+    });
+
+    return () => {
+      analysisAbortRef.current?.abort();
+      if (customSongUrlRef.current) URL.revokeObjectURL(customSongUrlRef.current);
+    };
+  }, [runMusicAnalysis]);
 
   useEffect(() => {
     // Connect to backend
@@ -68,6 +159,9 @@ const HostView = () => {
       });
       // Initialize orientation in ref
       playerOrientations.current[playerId] = { alpha: 0, beta: 0, gamma: 0 };
+      setPlayerCalibrationState(prev => (
+        setPlayerCalibration(prev, playerId, CALIBRATION_ALIGNING)
+      ));
     });
 
     socket.on('player_left', ({ playerId }) => {
@@ -89,6 +183,19 @@ const HostView = () => {
         return next;
       });
       delete playerOrientations.current[playerId];
+      setPlayerCalibrationState(prev => removePlayerCalibration(prev, playerId));
+    });
+
+    socket.on('player_calibration_started', ({ playerId }) => {
+      setPlayerCalibrationState(prev => (
+        setPlayerCalibration(prev, playerId, CALIBRATION_ALIGNING)
+      ));
+    });
+
+    socket.on('player_calibration_completed', ({ playerId }) => {
+      setPlayerCalibrationState(prev => (
+        setPlayerCalibration(prev, playerId, CALIBRATION_READY)
+      ));
     });
 
     socket.on('player_orientation', ({ playerId, data }) => {
@@ -132,6 +239,7 @@ const HostView = () => {
       setPlayers({});
       setScores({});
       setLives({});
+      setPlayerCalibrationState({});
       setDebugData({});
       setFinalResults([]);
       setGameState('waiting');
@@ -143,6 +251,62 @@ const HostView = () => {
       window.clearTimeout(replaceRoom);
     };
   }, [gameState]);
+
+  const calibrationSummary = getCalibrationSummary(players, playerCalibration);
+  const pendingPlayer = Object.values(players).find(
+    player => playerCalibration[player.id] !== CALIBRATION_READY
+  );
+  const analysisReady = analysisState.phase === 'ready' || analysisState.phase === 'fallback';
+
+  const releaseCustomSongUrl = () => {
+    if (!customSongUrlRef.current) return;
+    URL.revokeObjectURL(customSongUrlRef.current);
+    customSongUrlRef.current = null;
+  };
+
+  const handleMusicFileChange = event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    stopMusic();
+    releaseCustomSongUrl();
+    const songUrl = URL.createObjectURL(file);
+    customSongUrlRef.current = songUrl;
+    const title = file.name.replace(/\.[^.]+$/, '') || '내 음악';
+    setSelectedTrackName(file.name);
+    void runMusicAnalysis({
+      songUrl,
+      audioFile: file,
+      title,
+      artist: '내 음악',
+      allowFallback: false,
+      storage: null,
+    });
+  };
+
+  const useDefaultMusic = () => {
+    stopMusic();
+    releaseCustomSongUrl();
+    setSelectedTrackName(TOXIC_FALLBACK_BEATMAP.title);
+    void runMusicAnalysis({
+      songUrl: TOXIC_FALLBACK_BEATMAP.songUrl,
+      title: TOXIC_FALLBACK_BEATMAP.title,
+      artist: TOXIC_FALLBACK_BEATMAP.artist,
+      allowFallback: true,
+    });
+  };
+
+  useEffect(() => {
+    if (gameState !== 'playing') return;
+    if (calibrationSummary.showGuide) {
+      pauseMusic();
+      return;
+    }
+    void resumeMusic().catch(error => {
+      console.error('Could not resume music after calibration:', error);
+    });
+  }, [calibrationSummary.showGuide, gameState]);
 
   const finishGame = useCallback(() => {
     if (replacingRoomRef.current) return;
@@ -159,6 +323,7 @@ const HostView = () => {
   finishGameRef.current = finishGame;
 
   const startGame = () => {
+    if (!calibrationSummary.allReady || !analysisReady) return;
     const playerIds = Object.keys(players);
     const resetLives = createPlayerLives(playerIds);
     const resetScores = Object.fromEntries(playerIds.map(playerId => [playerId, 0]));
@@ -169,8 +334,8 @@ const HostView = () => {
     setScores(resetScores);
     setFinalResults([]);
     setAudioError(null);
-    void startMusic(() => finishGameRef.current()).catch(error => {
-      console.error('Could not start Toxic:', error);
+    void startMusic(beatmap.songUrl, () => finishGameRef.current()).catch(error => {
+      console.error('Could not start analyzed music:', error);
       stopMusic();
       replacingRoomRef.current = false;
       setAudioError('음악을 재생하지 못했습니다. 브라우저 오디오 권한을 확인한 뒤 다시 시작해 주세요.');
@@ -211,8 +376,48 @@ const HostView = () => {
     <div className="app-container">
       {gameState === 'waiting' && (
         <div className="glass-panel">
-          <h1 className="title">Web-Shake Showdown</h1>
-          <p className="subtitle">Scan to join with your smartphone</p>
+          <h1 className="title">웹 셰이크 쇼다운</h1>
+          <p className="subtitle">휴대폰으로 QR 코드를 스캔하세요</p>
+          <div style={{ display: 'grid', gap: '10px', justifyItems: 'center', margin: '18px 0' }}>
+            <label
+              className="btn"
+              style={{ display: 'inline-block', padding: '12px 18px', cursor: 'pointer' }}
+            >
+              내 음악 파일 선택
+              <input
+                type="file"
+                accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac"
+                onChange={handleMusicFileChange}
+                style={{
+                  position: 'absolute',
+                  width: '1px',
+                  height: '1px',
+                  overflow: 'hidden',
+                  clip: 'rect(0, 0, 0, 0)',
+                }}
+              />
+            </label>
+            <span style={{ color: '#fff', opacity: 0.78, fontSize: '0.82rem' }}>
+              선택한 음악: {selectedTrackName}
+            </span>
+            {selectedTrackName !== TOXIC_FALLBACK_BEATMAP.title && (
+              <button type="button" onClick={useDefaultMusic} style={{ padding: '7px 12px' }}>
+                기본 음악으로 돌아가기
+              </button>
+            )}
+          </div>
+          <p
+            role="status"
+            style={{
+              color: analysisState.phase === 'error'
+                ? '#ff5577'
+                : analysisState.phase === 'fallback'
+                  ? '#ffcc55'
+                  : '#00f3ff',
+            }}
+          >
+            {analysisState.message}
+          </p>
           {audioError && (
             <p role="alert" style={{ color: '#ff5577', maxWidth: '32rem' }}>
               {audioError}
@@ -227,10 +432,15 @@ const HostView = () => {
               <div className="room-id">{roomId}</div>
 
               <div className="players-list">
-                <h3>Players Connected: {Object.keys(players).length}</h3>
+                <h3>연결된 플레이어: {Object.keys(players).length}명</h3>
                 <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-                  {Object.values(players).map(p => (
-                    <div key={p.id} style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: p.color, boxShadow: `0 0 10px ${p.color}` }}></div>
+                  {Object.values(players).map((p, index) => (
+                    <div key={p.id} style={{ display: 'grid', justifyItems: 'center', gap: '6px' }}>
+                      <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: p.color, boxShadow: `0 0 10px ${p.color}` }} />
+                      <span style={{ color: p.color, fontSize: '0.78rem', fontWeight: 800 }}>
+                        {index + 1}번 · {playerCalibration[p.id] === CALIBRATION_READY ? '위치 맞춤 완료' : '위치 맞추는 중'}
+                      </span>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -238,14 +448,22 @@ const HostView = () => {
               <button
                 className="btn"
                 onClick={startGame}
-                disabled={Object.keys(players).length === 0}
-                style={{ opacity: Object.keys(players).length === 0 ? 0.5 : 1 }}
+                disabled={!calibrationSummary.allReady || !analysisReady}
+                style={{ opacity: calibrationSummary.allReady && analysisReady ? 1 : 0.5 }}
               >
-                Start Game
+                {!analysisReady
+                  ? analysisState.phase === 'error'
+                    ? '다른 음악 파일을 선택해 주세요'
+                    : '음악 자동 분석 중'
+                  : calibrationSummary.total === 0
+                  ? '휴대폰 연결 대기 중'
+                  : calibrationSummary.allReady
+                    ? '게임 시작'
+                    : '휴대폰 위치 맞추는 중'}
               </button>
             </>
           ) : (
-            <p>Creating room...</p>
+            <p>게임 방을 만드는 중...</p>
           )}
         </div>
       )}
@@ -253,9 +471,9 @@ const HostView = () => {
       {gameState === 'finished' && (
         <div className="glass-panel" style={{ minWidth: 'min(520px, 88vw)', textAlign: 'center' }}>
           <h1 className="title" style={{ color: '#ff2d78', textShadow: '0 0 22px #ff0055' }}>
-            GAME OVER
+            게임 종료
           </h1>
-          <p className="subtitle" style={{ letterSpacing: '0.28rem' }}>FINAL SCORE</p>
+          <p className="subtitle" style={{ letterSpacing: '0.28rem' }}>최종 점수</p>
 
           <div style={{ display: 'grid', gap: '18px', margin: '32px 0' }}>
             {finalResults.map(result => (
@@ -270,7 +488,7 @@ const HostView = () => {
                 }}
               >
                 <div style={{ color: result.color, fontSize: '1.2rem', fontWeight: 800 }}>
-                  {result.label}
+                  {result.label.replace('P', '플레이어 ')}
                 </div>
                 <div
                   style={{
@@ -300,10 +518,10 @@ const HostView = () => {
               {Object.values(players).map(p => (
                 <div key={p.id} style={{ display: 'flex', flexDirection: 'column' }}>
                   <div className="score-display" style={{ color: p.color }}>
-                    P{Object.keys(players).indexOf(p.id) + 1}: {scores[p.id] ?? 0}
+                    {Object.keys(players).indexOf(p.id) + 1}번: {scores[p.id] ?? 0}점
                   </div>
                   <div
-                    aria-label={`${lives[p.id] ?? INITIAL_LIVES} lives remaining`}
+                    aria-label={`남은 기회 ${lives[p.id] ?? INITIAL_LIVES}개`}
                     style={{
                       color: '#ff2d55',
                       fontSize: '2rem',
@@ -338,8 +556,18 @@ const HostView = () => {
             playerOrientations={playerOrientations}
             onHit={handleHit}
             onMiss={handleMiss}
+            beatmap={beatmap}
+            paused={calibrationSummary.showGuide}
           />
         </>
+      )}
+
+      {gameState !== 'finished' && calibrationSummary.showGuide && (
+        <AlignmentGuide
+          mode="host"
+          color={pendingPlayer?.color ?? '#00f3ff'}
+          pendingCount={calibrationSummary.pending}
+        />
       )}
     </div>
   );

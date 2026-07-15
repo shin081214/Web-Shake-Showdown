@@ -1,35 +1,19 @@
 const express = require('express');
 const http = require('http');
-const path = require('node:path');
 const { Server } = require('socket.io');
-const { mountProductionFrontend } = require('./productionFrontend');
+const cors = require('cors');
 const { createRoom, replaceRoom } = require('./roomManager');
-const { createSocketRequestAuthorizer, parseAllowedOrigins } = require('./socketOrigin');
 
 const app = express();
-mountProductionFrontend(app, {
-  distPath: process.env.FRONTEND_DIST_PATH || path.resolve(__dirname, '../frontend/dist'),
-});
+app.use(cors());
 
 const server = http.createServer(app);
-const configuredSocketOrigins = parseAllowedOrigins(process.env.SOCKET_ALLOWED_ORIGINS);
-const socketServerOptions = {
-  allowRequest: createSocketRequestAuthorizer(),
-};
-
-// Local Vite development uses a permissive WebSocket policy. Production is
-// same-origin by default and only enables cross-origin CORS when explicitly set.
-if (process.env.NODE_ENV !== 'production' || configuredSocketOrigins.length > 0) {
-  socketServerOptions.cors = {
-    origin:
-      process.env.NODE_ENV !== 'production' || configuredSocketOrigins.includes('*')
-        ? '*'
-        : configuredSocketOrigins,
-    methods: ['GET', 'POST'],
-  };
-}
-
-const io = new Server(server, socketServerOptions);
+const io = new Server(server, {
+  cors: {
+    origin: '*', // For development, allow all
+    methods: ['GET', 'POST']
+  }
+});
 
 // Store active rooms and players
 const rooms = new Map(); // roomId -> { hostId: string, players: { [socketId]: { color, connected } } }
@@ -73,7 +57,7 @@ io.on('connection', (socket) => {
       const playerKeys = Object.keys(room.players);
       const color = playerColors[playerKeys.length % playerColors.length];
 
-      room.players[socket.id] = { color, connected: true };
+      room.players[socket.id] = { color, connected: true, calibrated: false };
       socket.join(roomId);
 
       // Notify controller of success
@@ -83,14 +67,32 @@ io.on('connection', (socket) => {
       io.to(room.hostId).emit('player_joined', { playerId: socket.id, color });
       console.log(`Player ${socket.id} joined room ${roomId}`);
     } else {
-      socket.emit('room_error', 'Room not found');
+      socket.emit('room_error', '게임 방을 찾을 수 없습니다. QR 코드를 다시 스캔해주세요.');
     }
+  });
+
+  // Keep the computer and phone alignment guides synchronized. Only a controller
+  // that belongs to the room may change its own calibration state.
+  socket.on('calibration_started', ({ roomId }) => {
+    const room = rooms.get(roomId?.toUpperCase());
+    if (!room?.players[socket.id]) return;
+
+    room.players[socket.id].calibrated = false;
+    io.to(room.hostId).emit('player_calibration_started', { playerId: socket.id });
+  });
+
+  socket.on('calibration_completed', ({ roomId }) => {
+    const room = rooms.get(roomId?.toUpperCase());
+    if (!room?.players[socket.id]) return;
+
+    room.players[socket.id].calibrated = true;
+    io.to(room.hostId).emit('player_calibration_completed', { playerId: socket.id });
   });
 
   // Receive orientation data from controller and relay to host
   socket.on('orientation', ({ roomId, data }) => {
     const room = rooms.get(roomId?.toUpperCase());
-    if (room) {
+    if (room?.players[socket.id]) {
       // Orientation is real-time state, not a command: never queue stale frames.
       io.to(room.hostId).volatile.emit('player_orientation', { playerId: socket.id, data });
     }
@@ -128,7 +130,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, '0.0.0.0', () => {
-  const address = server.address();
-  const boundPort = typeof address === 'object' && address ? address.port : PORT;
-  console.log(`Server listening on 0.0.0.0:${boundPort}`);
+  console.log(`Server listening on 0.0.0.0:${PORT}`);
 });

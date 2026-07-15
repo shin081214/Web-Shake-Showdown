@@ -49,3 +49,13 @@ test('song time labels clamp to the track duration', () => {
   assert.equal(formatSongTime(Number.POSITIVE_INFINITY), '0:00');
   assert.equal(formatSongTime(999), '2:48');
 });
+
+test('section and time helpers accept a runtime-analyzed beatmap', () => {
+  const sections = [
+    { start: 0, end: 10, name: 'QUIET' },
+    { start: 10, end: 30, name: 'RUSH' },
+  ];
+
+  assert.equal(getBeatmapSection(12, sections).name, 'RUSH');
+  assert.equal(formatSongTime(999, 30), '0:30');
+});

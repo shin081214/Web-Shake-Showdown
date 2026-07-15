@@ -1,13 +1,12 @@
-import { TOXIC_SONG_URL } from './toxicBeatmap.js';
-
-// The song uses an HTML audio element for a stable, seekable gameplay clock. Hit
-// sounds stay in Web Audio so several glass bursts can overlap without restarting it.
+// Music uses an HTML audio element as the authoritative beatmap clock. The glass
+// shatter stays in Web Audio so overlapping hits do not restart the track.
 
 let audioCtx = null;
 let masterGain = null;
 let glassNoiseBuffer = null;
 let started = false;
 let music = null;
+let musicUrl = null;
 let musicEndedHandler = null;
 
 const MUSIC_VOLUME = 0.68;
@@ -44,19 +43,24 @@ function getGlassNoiseBuffer(context) {
   return glassNoiseBuffer;
 }
 
-function getMusic() {
-  if (!music) {
-    music = new window.Audio(TOXIC_SONG_URL);
-    music.preload = 'auto';
-    music.volume = MUSIC_VOLUME;
-  }
-  return music;
-}
-
 function clearMusicEndedHandler() {
   if (!music || !musicEndedHandler) return;
   music.removeEventListener('ended', musicEndedHandler);
   musicEndedHandler = null;
+}
+
+function getMusic(songUrl) {
+  if (!music || musicUrl !== songUrl) {
+    if (music) {
+      clearMusicEndedHandler();
+      music.pause();
+    }
+    music = new window.Audio(songUrl);
+    musicUrl = songUrl;
+    music.preload = 'auto';
+    music.volume = MUSIC_VOLUME;
+  }
+  return music;
 }
 
 export function playHitSound(context, output = masterGain) {
@@ -96,7 +100,7 @@ export function playHitSound(context, output = masterGain) {
   });
 }
 
-/** Unlock Web Audio on the host's Start Game click. */
+/** Unlock Web Audio on the host's Start Game click without starting music yet. */
 export function initAudio() {
   if (started) return;
   started = true;
@@ -104,10 +108,9 @@ export function initAudio() {
   getGlassNoiseBuffer(context);
 }
 
-/** Start Toxic from the beginning and use it as the authoritative beatmap clock. */
-export async function startMusic(onEnded) {
+export async function startMusic(songUrl, onEnded) {
   initAudio();
-  const track = getMusic();
+  const track = getMusic(songUrl);
   track.pause();
   track.currentTime = 0;
   clearMusicEndedHandler();
@@ -118,6 +121,14 @@ export async function startMusic(onEnded) {
   }
 
   await track.play();
+}
+
+export function pauseMusic() {
+  music?.pause();
+}
+
+export async function resumeMusic() {
+  if (music?.paused) await music.play();
 }
 
 export function stopMusic() {

@@ -62,17 +62,31 @@ export const TOXIC_NOTES = TOXIC_NOTE_DATA.map(([time, lane, accent], index) => 
   accent: Boolean(accent),
 }));
 
-export function getBeatmapSection(songTime) {
+export const TOXIC_FALLBACK_BEATMAP = {
+  songUrl: TOXIC_SONG_URL,
+  title: 'TOXIC',
+  artist: 'BoyWithUke',
+  duration: TOXIC_SONG_DURATION,
+  bpm: TOXIC_BPM,
+  confidence: 0,
+  notes: TOXIC_NOTES,
+  sections: TOXIC_SECTIONS,
+  analysisSource: '정적 폴백',
+};
+
+export function getBeatmapSection(songTime, sections = TOXIC_SECTIONS) {
   const time = Math.max(0, Number.isFinite(songTime) ? songTime : 0);
-  return TOXIC_SECTIONS.find(section => time < section.end) ?? TOXIC_SECTIONS.at(-1);
+  const safeSections = Array.isArray(sections) && sections.length > 0 ? sections : TOXIC_SECTIONS;
+  return safeSections.find(section => time < section.end) ?? safeSections.at(-1);
 }
 
 export function getNoteZ(noteTime, songTime) {
   return NOTE_HIT_Z + (songTime - noteTime) * NOTE_SPEED;
 }
 
-export function formatSongTime(seconds) {
-  const safeSeconds = Math.max(0, Math.min(TOXIC_SONG_DURATION, Number.isFinite(seconds) ? seconds : 0));
+export function formatSongTime(seconds, duration = TOXIC_SONG_DURATION) {
+  const safeDuration = Number.isFinite(duration) ? Math.max(0, duration) : TOXIC_SONG_DURATION;
+  const safeSeconds = Math.max(0, Math.min(safeDuration, Number.isFinite(seconds) ? seconds : 0));
   const minutes = Math.floor(safeSeconds / 60);
   const remainder = Math.floor(safeSeconds % 60);
   return `${minutes}:${String(remainder).padStart(2, '0')}`;

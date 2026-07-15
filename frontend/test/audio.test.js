@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import {
   getMusicTime,
   initAudio,
+  pauseMusic,
   playHitSound,
+  resumeMusic,
   startMusic,
   stopMusic,
 } from '../src/audio.js';
-import { TOXIC_SONG_URL } from '../src/toxicBeatmap.js';
 
 class AudioNode {
   connect(target) {
@@ -116,43 +117,64 @@ test('a hit starts a noise crack and multiple ringing glass fragments', () => {
   assert.equal(oscillators.every(oscillator => oscillator.stopped), true);
 });
 
-test('initializing Web Audio does not start the song before the game starts', () => {
-  const { FakeAudioContext, FakeAudio, audioElements, oscillators } = createAudioHarness();
+test('initializing audio does not start any background music', () => {
+  const { FakeAudioContext, oscillators } = createAudioHarness();
   const originalWindow = globalThis.window;
   const originalSetInterval = globalThis.setInterval;
 
-  globalThis.window = { AudioContext: FakeAudioContext, Audio: FakeAudio };
+  globalThis.window = { AudioContext: FakeAudioContext };
   globalThis.setInterval = () => 1;
 
   try {
     initAudio();
     assert.equal(oscillators.length, 0);
-    assert.equal(audioElements.length, 0);
   } finally {
     globalThis.window = originalWindow;
     globalThis.setInterval = originalSetInterval;
   }
 });
 
-test('the Toxic track starts at zero and exposes its playback time as the map clock', async () => {
+test('the analyzed track starts at zero and exposes its playback position as the map clock', async () => {
   const { FakeAudioContext, FakeAudio, audioElements } = createAudioHarness();
   const originalWindow = globalThis.window;
   globalThis.window = { AudioContext: FakeAudioContext, Audio: FakeAudio };
 
   try {
-    await startMusic();
+    await startMusic('/audio/analyzed.mp3');
 
     assert.equal(audioElements.length, 1);
-    assert.equal(audioElements[0].source, TOXIC_SONG_URL);
+    assert.equal(audioElements[0].source, '/audio/analyzed.mp3');
     assert.equal(audioElements[0].played, true);
     assert.equal(audioElements[0].currentTime, 0);
 
-    audioElements[0].currentTime = 42.5;
-    assert.equal(getMusicTime(), 42.5);
+    audioElements[0].currentTime = 12.5;
+    assert.equal(getMusicTime(), 12.5);
 
     stopMusic();
     assert.equal(audioElements[0].paused, true);
     assert.equal(audioElements[0].currentTime, 0);
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test('pausing for calibration preserves the music clock until playback resumes', async () => {
+  const { FakeAudioContext, FakeAudio, audioElements } = createAudioHarness();
+  const originalWindow = globalThis.window;
+  globalThis.window = { AudioContext: FakeAudioContext, Audio: FakeAudio };
+
+  try {
+    await startMusic('/audio/calibration-pause.mp3');
+    audioElements[0].currentTime = 7.25;
+
+    pauseMusic();
+    assert.equal(audioElements[0].paused, true);
+    assert.equal(getMusicTime(), 7.25);
+
+    await resumeMusic();
+    assert.equal(audioElements[0].paused, false);
+    assert.equal(getMusicTime(), 7.25);
+    stopMusic();
   } finally {
     globalThis.window = originalWindow;
   }

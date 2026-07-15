@@ -17,23 +17,22 @@ import {
   NOTE_LEAD_SECONDS,
   NOTE_MISS_Z,
   NOTE_SPEED,
-  TOXIC_BPM,
-  TOXIC_NOTES,
-  TOXIC_SONG_DURATION,
   formatSongTime,
   getBeatmapSection,
   getNoteZ,
 } from '../toxicBeatmap';
 
-// Schedule authored notes against the audio element's playback time. Deriving Z from
-// an absolute song clock keeps every cube on beat even after a slow render frame.
+// Schedule analyzed notes against the audio element's absolute playback time so
+// slow frames cannot make the map drift away from the music.
 const ObstaclesManager = ({
   players,
   playerOrientations,
   onHit,
   onMiss,
   hitEffects,
+  beatmap,
   onMapStatusChange,
+  paused,
 }) => {
   const [obstacles, setObstacles] = useState([]);
   const obstaclesRef = useRef([]);
@@ -41,8 +40,9 @@ const ObstaclesManager = ({
   const lastStatusKeyRef = useRef(null);
 
   useFrame(() => {
+    if (paused) return;
     const songTime = getMusicTime();
-    const section = getBeatmapSection(songTime);
+    const section = getBeatmapSection(songTime, beatmap.sections);
     const statusKey = `${section.name}:${Math.floor(songTime)}`;
     if (lastStatusKeyRef.current !== statusKey) {
       lastStatusKeyRef.current = statusKey;
@@ -55,11 +55,11 @@ const ObstaclesManager = ({
 
     while (
       playerArray.length > 0
-      && nextNoteIndexRef.current < TOXIC_NOTES.length
-      && TOXIC_NOTES[nextNoteIndexRef.current].time - songTime <= NOTE_LEAD_SECONDS
+      && nextNoteIndexRef.current < beatmap.notes.length
+      && beatmap.notes[nextNoteIndexRef.current].time - songTime <= NOTE_LEAD_SECONDS
     ) {
       const noteIndex = nextNoteIndexRef.current;
-      const note = TOXIC_NOTES[noteIndex];
+      const note = beatmap.notes[noteIndex];
       const targetIndex = noteIndex % playerArray.length;
       const targetPlayer = playerArray[targetIndex];
       const playerCenter = playerArray.length === 1 ? 0 : (targetIndex === 0 ? -2 : 2);
@@ -67,7 +67,6 @@ const ObstaclesManager = ({
 
       spawned.push({
         ...note,
-        id: note.id,
         x: playerCenter + note.lane * laneSpacing,
         y: 0,
         z: getNoteZ(note.time, songTime),
@@ -84,7 +83,7 @@ const ObstaclesManager = ({
     // updater runs twice, which previously double-counted every hit.
     const hitPlayerIds = [];
     const missedPlayerIds = [];
-    const pArray = playerArray;
+    const pArray = Object.values(players);
     next = next.map(obs => {
       let updatedObs = {
         ...obs,
@@ -162,10 +161,11 @@ const ObstaclesManager = ({
 };
 
 // Animated Synthwave Grid Ground
-const MovingGrid = ({ color, y, speed }) => {
+const MovingGrid = ({ color, y, speed, paused }) => {
   const gridRef = useRef();
 
   useFrame((state, delta) => {
+    if (paused) return;
     // move the grid towards the camera to simulate forward motion
     if (gridRef.current) {
       gridRef.current.position.z = (gridRef.current.position.z + speed * delta) % 10;
@@ -180,11 +180,11 @@ const MovingGrid = ({ color, y, speed }) => {
   );
 };
 
-const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
+const GameScene = ({ players, playerOrientations, onHit, onMiss, beatmap, paused = false }) => {
   const playersArray = Object.values(players);
   const hitEffectsRef = useRef();
   const [mapStatus, setMapStatus] = useState(() => ({
-    section: getBeatmapSection(0),
+    section: getBeatmapSection(0, beatmap.sections),
     songTime: 0,
   }));
   const { section, songTime } = mapStatus;
@@ -192,7 +192,7 @@ const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
   return (
     <div className="canvas-container">
       <div
-        aria-label={`Toxic ${section.name}, level ${section.level}${section.isRush ? ', rush active' : ''}`}
+        aria-label={`${beatmap.title} ${section.name}, 난이도 ${section.level}단계${section.isRush ? ', 폭주 진행 중' : ''}`}
         style={{
           position: 'absolute',
           top: '1.25rem',
@@ -211,14 +211,14 @@ const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
         }}
       >
         <div style={{ fontSize: '1rem', opacity: 0.9 }}>
-          TOXIC · {section.name} · LEVEL {section.level}
+          {beatmap.title} · {section.name} · {section.level}단계
         </div>
-        <div style={{ marginTop: '0.3rem', fontSize: '0.72rem', color: '#fff', opacity: 0.72 }}>
-          BoyWithUke · {formatSongTime(songTime)} / {formatSongTime(TOXIC_SONG_DURATION)} · {Math.round(TOXIC_BPM)} BPM
+        <div style={{ marginTop: '0.3rem', fontSize: '0.72rem', color: '#fff', opacity: 0.76 }}>
+          {beatmap.artist} · {formatSongTime(songTime, beatmap.duration)} / {formatSongTime(beatmap.duration, beatmap.duration)} · {Math.round(beatmap.bpm)} BPM · {beatmap.analysisSource}
         </div>
         {section.isRush && (
           <div style={{ marginTop: '0.2rem', fontSize: '2rem', color: '#ffdd00' }}>
-            RUSH!
+            폭주!
           </div>
         )}
       </div>
@@ -243,8 +243,8 @@ const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
         />
 
         {/* Floor grid plus a faint mirrored ceiling grid for a tunnel feel */}
-        <MovingGrid color="#ff007f" y={-2} speed={NOTE_SPEED * (section.isRush ? 1.08 : 1)} />
-        <MovingGrid color="#00f3ff" y={8} speed={NOTE_SPEED * (section.isRush ? 1.08 : 1)} />
+        <MovingGrid color="#ff007f" y={-2} speed={NOTE_SPEED * (section.isRush ? 1.08 : 1)} paused={paused} />
+        <MovingGrid color="#00f3ff" y={8} speed={NOTE_SPEED * (section.isRush ? 1.08 : 1)} paused={paused} />
 
         <ObstaclesManager
           players={players}
@@ -252,7 +252,9 @@ const GameScene = ({ players, playerOrientations, onHit, onMiss }) => {
           onHit={onHit}
           onMiss={onMiss}
           hitEffects={hitEffectsRef}
+          beatmap={beatmap}
           onMapStatusChange={setMapStatus}
+          paused={paused}
         />
 
         <HitEffects ref={hitEffectsRef} />
